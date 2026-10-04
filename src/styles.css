@@ -1,0 +1,4 @@
+body { font: 15px/1.5 system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+form { display: flex; gap: 8px; margin-top: 12px; }
+input { flex: 1; }
+.reply { white-space: pre-wrap; border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-top: 16px; min-height: 120px; }
