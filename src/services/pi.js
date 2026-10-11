@@ -1,30 +1,139 @@
-import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+// Newt talks to Pi's two lower layers only:
+//   pi-ai          → models, providers, streaming (one API over every LLM provider)
+//   pi-agent-core  → the agent loop (model call → tool calls → results → repeat)
+// No pi-coding-agent: no ~/.pi settings, no auth.json, no AGENTS.md/skills/extensions discovery,
+// no JSONL sessions. Everything the loop needs is passed in explicitly below.
+import { runAgentLoop } from "@earendil-works/pi-agent-core";
+import { createModels } from "@earendil-works/pi-ai";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { tools } from "../tools/index.js";
+import { traceRun } from "./tracing.js";
 
-// Reads the same credentials as the pi CLI (~/.pi/agent/auth.json).
-const runtime = await ModelRuntime.create();
+const SYSTEM_PROMPT = "You are Newt, a helpful assistant.";
+
+// ponytail: OpenRouter is the only provider registered, because it's the only key we have.
+// Add another provider = one more setProvider() line and one more env var.
+const models = createModels();
+models.setProvider(openrouterProvider());
+
+// The key comes from the environment (Bun loads .env), never from ~/.pi.
+const API_KEYS = { openrouter: process.env.OPENROUTER_API_KEY };
+
+const keyOf = (model) => `${model.provider}/${model.id}`;
+
+// One readable line per loop step instead of raw event JSON. Streaming chunks (message_update) are skipped.
+const short = (s, n = 120) => {
+	const flat = s.replace(/\s+/g, " ");
+	return flat.length > n ? `${flat.slice(0, n)}…` : flat;
+};
+const textOf = (content) => (typeof content === "string" ? content : content.filter((p) => p.type === "text").map((p) => p.text).join(""));
+let turn = 0;
+
+function logEvent(event) {
+	switch (event.type) {
+		case "agent_start":
+			turn = 0;
+			return console.log("▶ run started");
+		case "turn_start":
+			return console.log(`  turn ${++turn}`);
+		case "message_end": {
+			const m = event.message;
+			if (m.role === "user") return console.log(`    user: ${short(textOf(m.content))}`);
+			if (m.role !== "assistant") return;
+			const calls = m.content.filter((p) => p.type === "toolCall").length;
+			const said = textOf(m.content).trim();
+			const usage = m.usage ? ` ${m.usage.input}→${m.usage.output} tokens` : "";
+			if (said) console.log(`    model: ${short(said)}`);
+			return console.log(`    [${m.stopReason}${calls ? `, ${calls} tool call(s)` : ""}${usage}]${m.errorMessage ? ` ${m.errorMessage}` : ""}`);
+		}
+		case "tool_execution_start":
+			return console.log(`    → ${event.toolName} ${JSON.stringify(event.args)}`);
+		case "tool_execution_end":
+			return console.log(`    ${event.isError ? "✗" : "←"} ${event.toolName}: ${short(textOf(event.result.content))}`);
+		case "agent_end":
+			return console.log(`■ run ended after ${turn} turn(s)\n`);
+	}
+}
 
 export async function listModels() {
-	const models = await runtime.getAvailable();
-	return models.map((model) => `${model.provider}/${model.id}`);
+	return models.getModels("openrouter").map(keyOf);
 }
 
 export async function chat(modelKey, text) {
-	const model = (await runtime.getAvailable()).find((m) => `${m.provider}/${m.id}` === modelKey);
-	if (!model) throw new Error(`Unknown or unavailable model: ${modelKey}`);
+	const model = models.getModels().find((m) => keyOf(m) === "openrouter/nvidia/nemotron-3.5-lightning:free");
+	// const model = models.getModels().find((m) => keyOf(m) === modelKey);
+	if (!model) throw new Error(`Unknown model: ${modelKey}`);
+	if (!API_KEYS[model.provider]) throw new Error(`No API key for ${model.provider}. Set it in .env`);
 
-	const { session } = await createAgentSession({
+	// The whole conversation state. ponytail: one message, no history. Becomes the Postgres event log in task 1.1.
+	const context = {
+		messages: [{ role: "system", content: SYSTEM_PROMPT, timestamp: Date.now() }],
+		tools, // what the loop can execute; it declares them to the model by itself
+	};
+
+	const prompt = { role: "user", content: text, timestamp: Date.now() };
+
+	const config = {
 		model,
-		modelRuntime: runtime,
-		noTools: "all",
-		sessionManager: SessionManager.inMemory(),
-	});
+		// What the model actually sees each turn. Here: pass system/user/assistant/toolResult through unchanged.
+		convertToLlm: (messages) => messages.filter((m) => ["system", "user", "assistant", "toolResult"].includes(m.role)),
+		getApiKey: (provider) => API_KEYS[provider],
+	};
 
-	try {
-		await session.prompt(text);
-		const last = session.messages.at(-1);
-		if (last?.role === "assistant" && last.stopReason === "error") throw new Error(last.errorMessage ?? "Model error");
-		return session.getLastAssistantText() ?? "";
-	} finally {
-		session.dispose();
-	}
+	// Every step of the loop is reported here. Unused for now; this is where streaming (0.2) and tracing (0.3) plug in.
+	// const onEvent = (event) => {
+	// 	console.log(event);
+	// };
+	// Each event goes to the terminal log and to Langfuse.
+	const trace = traceRun({ model, context });
+	const onEvent = (event) => {
+		logEvent(event);
+		trace(event);
+	};
+
+	// Runs the loop until the model stops. Returns only the messages this run added (user prompt + assistant reply).
+	const newMessages = await runAgentLoop([prompt], context, config, onEvent, undefined, models.streamSimple.bind(models));
+
+	const reply = newMessages.findLast((m) => m.role === "assistant");
+	if (!reply) throw new Error("Model returned no reply");
+	if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(reply.errorMessage ?? `Model ${reply.stopReason}`);
+
+	return reply.content
+		.filter((part) => part.type === "text")
+		.map((part) => part.text)
+		.join("")
+		.trim();
 }
+
+// Previous version, on pi-coding-agent's AgentSession (kept for comparison):
+//
+// import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+//
+// // Reads the same credentials as the pi CLI (~/.pi/agent/auth.json).
+// const runtime = await ModelRuntime.create();
+//
+// export async function listModels() {
+// 	const models = await runtime.getAvailable();
+// 	return models.map((model) => `${model.provider}/${model.id}`);
+// }
+//
+// export async function chat(modelKey, text) {
+// 	const model = (await runtime.getAvailable()).find((m) => `${m.provider}/${m.id}` === modelKey);
+// 	if (!model) throw new Error(`Unknown or unavailable model: ${modelKey}`);
+//
+// 	const { session } = await createAgentSession({
+// 		model,
+// 		modelRuntime: runtime,
+// 		noTools: "all",
+// 		sessionManager: SessionManager.inMemory(),
+// 	});
+//
+// 	try {
+// 		await session.prompt(text);
+// 		const last = session.messages.at(-1);
+// 		if (last?.role === "assistant" && last.stopReason === "error") throw new Error(last.errorMessage ?? "Model error");
+// 		return session.getLastAssistantText() ?? "";
+// 	} finally {
+// 		session.dispose();
+// 	}
+// }
