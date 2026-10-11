@@ -21,6 +21,8 @@
     "react-dom": "^19.3.0"
   },
   "scripts": {
-    "dev": "bun --hot index.js"
+    "dev": "bun --hot index.js",
+    "migrate": "bun migrate.js",
+    "newt": "bun cli.js"
   }
 }

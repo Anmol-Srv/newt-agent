@@ -9,6 +9,7 @@ function App() {
 	const [items, setItems] = useState([]); // {id, model, prompt, reply?, error?, pending?}
 	const [notice, setNotice] = useState("");
 	const [loading, setLoading] = useState(false);
+	const [goalId, setGoalId] = useState(); // the conversation; set by the server on the first reply
 	const inputRef = useRef(null);
 	const endRef = useRef(null);
 
@@ -43,9 +44,10 @@ function App() {
 			const res = await fetch("/api/chat", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ model, message: prompt }),
+				body: JSON.stringify({ model, message: prompt, goalId }),
 			});
 			const data = await res.json();
+			if (data.goalId) setGoalId(data.goalId);
 			finish(data.error || !res.ok ? { error: data.error ?? `HTTP ${res.status}` } : { reply: data.reply, stopped: data.budget?.stopped });
 		} catch (err) {
 			finish({ error: err.message });
@@ -85,6 +87,9 @@ function App() {
 						))}
 					</datalist>
 				</div>
+				<button type="button" className="secondary" onClick={() => { setGoalId(undefined); setItems([]); }} disabled={loading || !items.length}>
+					New chat
+				</button>
 			</header>
 			{model !== "" && !modelValid && <p className="hint warn" role="status">Pick a model from the list to send.</p>}
 
@@ -125,7 +130,7 @@ function App() {
 					/>
 					<button type="submit" disabled={!canSend}>{loading ? "Thinking…" : "Send"}</button>
 				</div>
-				<p className="hint">Each message is answered independently. Enter to send, Shift+Enter for a new line.</p>
+				<p className="hint">Newt remembers this conversation until you start a new chat. Enter to send, Shift+Enter for a new line.</p>
 			</form>
 		</div>
 	);

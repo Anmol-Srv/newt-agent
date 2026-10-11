@@ -1,0 +1,14 @@
+# Local Postgres for Newt. ponytail: dev-only credentials; real ones live outside the repo (task H.3).
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: newt
+      POSTGRES_PASSWORD: newt
+      POSTGRES_DB: newt
+    ports:
+      - "5436:5432" # 5432-5435 are taken by other projects on this Mac
+    volumes:
+      - pgdata:/var/lib/postgresql
+volumes:
+  pgdata:
