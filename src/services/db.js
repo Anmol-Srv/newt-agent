@@ -21,7 +21,8 @@ export async function createRun(goalId, model) {
 }
 
 export async function appendStep(runId, seq, event) {
-	await sql`insert into steps (run_id, seq, type, data) values (${runId}, ${seq}, ${event.type}, ${event}::jsonb)`;
+	await sql`insert into steps (run_id, seq, type, data) values (${runId}, ${seq}, ${event.type}, ${event}::jsonb)
+		on conflict (run_id, seq) do nothing`; // a resumed run re-emits events it already stored
 }
 
 // Every message of every earlier run in this goal, in order: the conversation so far.
