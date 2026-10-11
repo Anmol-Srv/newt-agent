@@ -11,7 +11,8 @@ const textOf = (content) =>
 	typeof content === "string" ? content : content.filter((p) => p.type === "text").map((p) => p.text).join("");
 
 // Returns an event handler for one run. `context` is the loop's live context, used to record what the model saw.
-export function traceRun({ model, context }) {
+// `budget` (optional) is attached to the run when it ends: limits, usage, and which limit stopped it.
+export function traceRun({ model, context, budget }) {
 	if (!tracingEnabled()) return () => {};
 
 	let run, turn, generation;
@@ -86,9 +87,14 @@ export function traceRun({ model, context }) {
 				turn?.end();
 				return;
 
-			case "agent_end":
-				run?.end();
+			case "agent_end": {
+				const report = budget?.report();
+				run?.update({
+					metadata: { budget: report },
+					...(report?.stopped && { level: "WARNING", statusMessage: `Stopped by budget: ${report.stopped}` }),
+				}).end();
 				return;
+			}
 		}
 	};
 }

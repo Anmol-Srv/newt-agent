@@ -13,7 +13,7 @@ async function postChat(req) {
 		return Response.json({ error: "model and message are required" }, { status: 400 });
 	}
 	try {
-		return Response.json({ reply: await chat(model, message) });
+		return Response.json(await chat(model, message)); // { reply, budget }
 	} catch (err) {
 		return Response.json({ error: err.message }, { status: 500 });
 	}

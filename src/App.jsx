@@ -46,7 +46,7 @@ function App() {
 				body: JSON.stringify({ model, message: prompt }),
 			});
 			const data = await res.json();
-			finish(data.error || !res.ok ? { error: data.error ?? `HTTP ${res.status}` } : { reply: data.reply });
+			finish(data.error || !res.ok ? { error: data.error ?? `HTTP ${res.status}` } : { reply: data.reply, stopped: data.budget?.stopped });
 		} catch (err) {
 			finish({ error: err.message });
 		} finally {
@@ -99,7 +99,10 @@ function App() {
 						) : x.error ? (
 							<div className="msg error" role="alert"><strong>Error:</strong> {x.error}</div>
 						) : (
-							<div className="msg bot">{x.reply}</div>
+							<div className="msg bot">
+								{x.reply || (x.stopped && "(no answer)")}
+								{x.stopped && <div className="stopped">Stopped: budget limit {x.stopped} reached.</div>}
+							</div>
 						)}
 						<div className="meta">{x.model}</div>
 					</section>

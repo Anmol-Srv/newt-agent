@@ -8,6 +8,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { tools } from "../tools/index.js";
 import { traceRun } from "./tracing.js";
+import { createBudget, DEFAULT_LIMITS } from "./budget.js";
 
 const SYSTEM_PROMPT = "You are Newt, a helpful assistant.";
 
@@ -59,7 +60,7 @@ export async function listModels() {
 	return models.getModels("openrouter").map(keyOf);
 }
 
-export async function chat(modelKey, text) {
+export async function chat(modelKey, text, limits = DEFAULT_LIMITS) {
 	const model = models.getModels().find((m) => keyOf(m) === "openrouter/nvidia/nemotron-3.5-lightning:free");
 	// const model = models.getModels().find((m) => keyOf(m) === modelKey);
 	if (!model) throw new Error(`Unknown model: ${modelKey}`);
@@ -73,11 +74,13 @@ export async function chat(modelKey, text) {
 
 	const prompt = { role: "user", content: text, timestamp: Date.now() };
 
+	const budget = createBudget(limits);
 	const config = {
 		model,
 		// What the model actually sees each turn. Here: pass system/user/assistant/toolResult through unchanged.
 		convertToLlm: (messages) => messages.filter((m) => ["system", "user", "assistant", "toolResult"].includes(m.role)),
 		getApiKey: (provider) => API_KEYS[provider],
+		beforeToolCall: () => budget.beforeToolCall(),
 	};
 
 	// Every step of the loop is reported here. Unused for now; this is where streaming (0.2) and tracing (0.3) plug in.
@@ -85,55 +88,35 @@ export async function chat(modelKey, text) {
 	// 	console.log(event);
 	// };
 	// Each event goes to the terminal log and to Langfuse.
-	const trace = traceRun({ model, context });
+	// Budget first: it must see a reply's usage before the loop asks beforeToolCall about that reply's tools.
+	const trace = traceRun({ model, context, budget });
 	const onEvent = (event) => {
+		budget.onEvent(event);
 		logEvent(event);
 		trace(event);
 	};
 
 	// Runs the loop until the model stops. Returns only the messages this run added (user prompt + assistant reply).
-	const newMessages = await runAgentLoop([prompt], context, config, onEvent, undefined, models.streamSimple.bind(models));
+	// The budget's signal is how the loop gets cancelled when time runs out.
+	let newMessages, report;
+	try {
+		newMessages = await runAgentLoop([prompt], context, config, onEvent, budget.signal, models.streamSimple.bind(models));
+	} finally {
+		report = budget.report(); // also stops the timer
+	}
+	if (report.stopped) console.log(`  budget: stopped by ${report.stopped}`, report.used);
 
 	const reply = newMessages.findLast((m) => m.role === "assistant");
 	if (!reply) throw new Error("Model returned no reply");
-	if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(reply.errorMessage ?? `Model ${reply.stopReason}`);
+	// An abort caused by the budget is a clean stop, not a failure.
+	if (reply.stopReason === "error" || (reply.stopReason === "aborted" && !report.stopped)) {
+		throw new Error(reply.errorMessage ?? `Model ${reply.stopReason}`);
+	}
 
-	return reply.content
+	const answer = reply.content
 		.filter((part) => part.type === "text")
 		.map((part) => part.text)
 		.join("")
 		.trim();
+	return { reply: answer, budget: report };
 }
-
-// Previous version, on pi-coding-agent's AgentSession (kept for comparison):
-//
-// import { createAgentSession, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
-//
-// // Reads the same credentials as the pi CLI (~/.pi/agent/auth.json).
-// const runtime = await ModelRuntime.create();
-//
-// export async function listModels() {
-// 	const models = await runtime.getAvailable();
-// 	return models.map((model) => `${model.provider}/${model.id}`);
-// }
-//
-// export async function chat(modelKey, text) {
-// 	const model = (await runtime.getAvailable()).find((m) => `${m.provider}/${m.id}` === modelKey);
-// 	if (!model) throw new Error(`Unknown or unavailable model: ${modelKey}`);
-//
-// 	const { session } = await createAgentSession({
-// 		model,
-// 		modelRuntime: runtime,
-// 		noTools: "all",
-// 		sessionManager: SessionManager.inMemory(),
-// 	});
-//
-// 	try {
-// 		await session.prompt(text);
-// 		const last = session.messages.at(-1);
-// 		if (last?.role === "assistant" && last.stopReason === "error") throw new Error(last.errorMessage ?? "Model error");
-// 		return session.getLastAssistantText() ?? "";
-// 	} finally {
-// 		session.dispose();
-// 	}
-// }
